@@ -38,7 +38,7 @@ export function deserializeEosioType(
     const decodeOptions: IDeserializeOptions = typeof options === 'boolean' ? {} : options;
     let dataArray: Uint8Array;
     if (typeof data === 'string') {
-        dataArray = Uint8Array.from(Buffer.from(data, 'hex'));
+        dataArray = Buffer.from(data, 'hex');
     } else {
         dataArray = data;
     }

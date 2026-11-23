@@ -225,6 +225,65 @@ describe('serialization', () => {
             expect(result.balance).to.equal('100.0000 EOS');
         });
 
+        it('matches hex and offset binary views without changing caller-owned bytes', () => {
+            const object = { from: 'alice', to: 'bob', quantity: '1.00000000 WAX', memo: 'payment' };
+            const encoded = Serializer.encode({ object, type: 'transfer', abi: testAbi }).array;
+            const backing = Buffer.concat([Buffer.from([0xff]), encoded, Buffer.from([0xfe])]);
+            const before = Buffer.from(backing);
+            const view = backing.subarray(1, -1);
+            const hex = view.toString('hex');
+
+            for (const input of [
+                hex,
+                hex.toUpperCase(),
+                view,
+                new Uint8Array(view.buffer, view.byteOffset, view.length),
+            ]) {
+                expect(deserializeEosioType('transfer', input, testAbi)).to.deep.equal(object);
+            }
+            expect(backing).to.deep.equal(before);
+            expect(view.toString('hex')).to.equal(hex);
+        });
+
+        it('preserves Buffer hex truncation, ignored suffixes and decode errors', () => {
+            const hex = Buffer.from(
+                Serializer.encode({ object: { id: 42, active: true }, type: 'pair', abi: testAbi }).array,
+            ).toString('hex');
+            const expected = { id: 42, active: true };
+            // Buffer ignores a trailing nibble and stops at the first non-hex pair.
+            for (const input of [hex + 'f', hex + 'zz12', hex + ' 12', hex + 'ab']) {
+                expect(deserializeEosioType('pair', input, testAbi)).to.deep.equal(expected);
+            }
+            for (const input of ['', 'f', 'zz', '0x' + hex, hex.slice(0, -1), hex.slice(0, 4) + 'zz']) {
+                let message: string | undefined;
+                try {
+                    deserializeEosioType('pair', Uint8Array.from(Buffer.from(input, 'hex')), testAbi);
+                } catch (error) {
+                    message = (error as Error).message;
+                }
+                expect(message, input).to.include('Read past end of buffer');
+                expect(() => deserializeEosioType('pair', input, testAbi)).to.throw(message);
+            }
+        });
+
+        it('matches hex and binary float decoding including raw float128 bytes', () => {
+            const data = encodeAttributes({
+                weight: 92.13924923,
+                wear: 0.6197762,
+                wears: [0.5, 0.25],
+                attribute: ['float32', 1.5],
+            });
+            const before = Uint8Array.from(data);
+            const binary = deserializeEosioType('attributes', data, testAbi);
+            expect(deserializeEosioType('attributes', Buffer.from(data).toString('hex'), testAbi)).to.deep.equal(
+                binary,
+            );
+            expect(binary.weight).to.equal(92.13924923);
+            expect(binary.wear).to.equal(0.61977618932724);
+            expect(binary.quad).to.equal(QUAD_HEX);
+            expect(data).to.deep.equal(before);
+        });
+
         it('should return objectified plain JS values', () => {
             // Verify that Name types come back as strings, not Name objects
             const transferData = {
