@@ -1,6 +1,7 @@
 import { ABI, Serializer } from '@wharfkit/antelope';
 import { expect } from 'chai';
 import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -126,13 +127,71 @@ describe('Piscina deserializer', () => {
         let unfinished = 5;
         const pending = Array.from({ length: unfinished }, () =>
             pool.deserialize(task).then((result) => {
-                expect(pool.waiting).to.equal(--unfinished);
+                // Several task finalizers can run before this caller's callback.
+                expect(pool.waiting).to.be.within(0, --unfinished);
                 return result;
             }),
         );
         expect(pool.waiting).to.equal(5);
         await Promise.all(pending);
         expect(pool.waiting).to.equal(0);
+    });
+
+    it('reuses plain and JSON overrides through actual worker messages while retaining old revisions', async () => {
+        const pool = parallel();
+        const current = structuredClone(abiJson);
+        const historical = structuredClone(current);
+        for (let i = 0; i < 3; i++) {
+            const override = i === 1 ? JSON.stringify(current) : current;
+            const result = await pool.deserialize(
+                Array.from({ length: 3 }, () => ({ type: 'sample', data, abi: override })),
+            );
+            const expected = await new SingleThreadDeserializer(abiJson).deserialize([
+                { type: 'sample', data, abi: historical },
+            ]);
+            expect(result).to.deep.equal([expected[0], expected[0], expected[0]]);
+        }
+        current.structs[0]!.fields[0]!.name = 'new_owner';
+        const result = await pool.deserialize([
+            ...Array.from({ length: 3 }, () => ({ type: 'sample', data, abi: current })),
+            ...Array.from({ length: 3 }, () => ({ type: 'sample', data, abi: historical })),
+        ]);
+        expect((result[0]!.data as any).new_owner).to.equal('alice');
+        expect((result[3]!.data as any).owner).to.equal('alice');
+        expect((result[0]!.data as any).weight).to.equal(92.13924923);
+        expect((result[0]!.data as any).wears).to.deep.equal([0.61977618932724, 0.5]);
+    });
+
+    it('retains prepared types in the shipped worker across separately cloned messages', async () => {
+        const directory = await mkdtemp(resolve(tmpdir(), 'ship-abi-cache-'));
+        let worker: Piscina | undefined;
+        try {
+            const filename = resolve(directory, 'worker.cjs');
+            await writeFile(
+                filename,
+                `
+                const { ABI } = require(${JSON.stringify(require.resolve('@wharfkit/antelope'))});
+                const original = ABI.prototype.resolveType;
+                let resolutions = 0;
+                ABI.prototype.resolveType = function (name) {
+                    resolutions++;
+                    return original.call(this, name);
+                };
+                const decode = require(${JSON.stringify(resolve(__dirname, '../../dist/deserializer/worker.js'))}).default;
+                module.exports = async batch => ({ rows: await decode(batch), resolutions });
+            `,
+            );
+            worker = new Piscina({ filename, minThreads: 1, maxThreads: 1, workerData: { abi: abiJson } });
+            const batch = Array.from({ length: 3 }, () => ({ type: 'sample', data, abi: abiJson }));
+            const first = await worker.run(batch);
+            const second = await worker.run(batch);
+            expect(first.resolutions).to.equal(2);
+            expect(second.resolutions).to.equal(3);
+            expect(second.rows).to.deep.equal(first.rows);
+        } finally {
+            await worker?.destroy();
+            await rm(directory, { recursive: true, force: true });
+        }
     });
 
     it('rejects malformed batches and uncloneable tasks, restores accounting and keeps the worker usable', async () => {
