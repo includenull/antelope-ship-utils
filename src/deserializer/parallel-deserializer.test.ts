@@ -94,8 +94,11 @@ describe('Piscina deserializer', () => {
             { type: 'sample', data: new Uint8Array([1]) },
             { type: 'sample', data: null } as unknown as Batch[number],
             task[0],
+            { type: 'sample', data: '07f', abi: override },
+            { type: 'sample', data: '09zz', abi: ABI.from(override) },
             { type: 'name', data: '0000000000855c34' },
         ];
+        const before = Uint8Array.from(data);
         const expected = await new SingleThreadDeserializer(abiJson).deserialize(batch);
         const results = await Promise.all(Array.from({ length: 6 }, () => pool.deserialize(batch)));
         for (const result of results) expect(result).to.deep.equal(expected);
@@ -109,6 +112,9 @@ describe('Piscina deserializer', () => {
             },
         });
         expect(expected[2]).to.deep.equal({ success: true, data: { value: 7 } });
+        expect(expected[3]).to.deep.equal({ success: true, data: { value: 9 } });
+        expect(expected.at(-3)).to.deep.equal({ success: true, data: { value: 7 } });
+        expect(expected.at(-2)).to.deep.equal({ success: true, data: { value: 9 } });
         expect(expected[4]).to.deep.equal({
             success: false,
             data: null,
@@ -117,6 +123,7 @@ describe('Piscina deserializer', () => {
         expect(expected.at(-1)).to.deep.equal({ success: true, data: 'alice' });
         // Structured cloning must not detach caller-owned buffers.
         expect(data.byteLength).to.be.greaterThan(0);
+        expect(data).to.deep.equal(before);
         expect(await pool.deserialize([])).to.deep.equal([]);
         expect(pool.waiting).to.equal(0);
     });
@@ -271,8 +278,13 @@ describe('Piscina deserializer', () => {
             (async () => {
                 const decoder = new EOSJsDeserializer({ threads: 2 });
                 await decoder.init(${JSON.stringify(abiJson)});
-                const result = await decoder.deserialize([{ type: 'uint8', data: new Uint8Array([42]) }]);
-                if (result[0].data !== 42) throw new Error('Unexpected decode');
+                const result = await decoder.deserialize([
+                    { type: 'sample', data: ${JSON.stringify(Buffer.from(data).toString('hex'))} },
+                    { type: 'uint8', data: '2af' },
+                ]);
+                if (result[0].data.owner !== 'alice' || result[0].data.weight !== 92.13924923 || result[1].data !== 42) {
+                    throw new Error('Unexpected decode');
+                }
                 await decoder.terminate();
             })().catch((error) => { console.error(error); process.exitCode = 1; });
         `;
